@@ -84,6 +84,12 @@ if ! cmp -s "$APP/70-tb-stealth600.rules" "$RULE" 2>/dev/null; then
   sudo_ udevadm trigger --subsystem-match=hidraw --action=change
 fi
 
+# --- product photos (Turtle Beach's, not in the repo): fetched from their store once ---
+if [ ! -f "$APP/assets/views/audio.png" ]; then
+  say "Descargando las fotos del headset"
+  python3 "$APP/tb600_views.py" >/dev/null || say "No se pudieron descargar las fotos; la app funcionará sin ellas."
+fi
+
 # --- user files ---
 say "Instalando la app"
 mkdir -p "$BIN" "$(dirname "$DESKTOP")" "$(dirname "$UNIT")"

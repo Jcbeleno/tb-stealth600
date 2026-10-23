@@ -130,8 +130,9 @@ class HeadsetStage(Gtk.Widget):
 
     def __init__(self, folder):
         super().__init__()
+        # empty when the photos were never downloaded (tb600_views.py): the stage then stays blank
         self.tex = {os.path.splitext(f)[0]: Gdk.Texture.new_from_filename(os.path.join(folder, f))
-                    for f in os.listdir(folder) if f.endswith(".png")}
+                    for f in (os.listdir(folder) if os.path.isdir(folder) else []) if f.endswith(".png")}
         self.page, self.muted, self.link = "audio", False, None
         self.cur, self.prev, self.dir, self.t = "audio", None, 0, 1.0
         self.dim, self.sweep, self.breath = 1.0, -1.0, 0.0
@@ -196,7 +197,7 @@ class HeadsetStage(Gtk.Widget):
         return Graphene.Rect().init(-iw * sc / 2, -ih * sc / 2, iw * sc, ih * sc)
 
     def _draw(self, s, key, w, h, shift, angle, scale, opacity):
-        if opacity <= 0.01:
+        if opacity <= 0.01 or key not in self.tex:
             return
         s.save()
         s.translate(Graphene.Point().init(w / 2 + shift, h / 2))

@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 # decompiled Swarm II code: local reference only
 re/mosit-cs/
+# Turtle Beach product shots: downloaded at install time by tb600_views.py
+assets/views/

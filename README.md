@@ -23,4 +23,4 @@ From a checkout, `./install.sh` installs that folder in place.
 
 Requires GTK ≥ 4.12 and libadwaita ≥ 1.5. The 3D surround uses HRIRs from SADIE II (Apache-2.0, see `assets/hrir/NOTICE`).
 
-Firmware updates are not implemented. Product photos in `assets/` © Turtle Beach.
+Firmware updates are not implemented. The headset photos are © Turtle Beach: they are not in this repo, the installer downloads them from the Turtle Beach store (`tb600_views.py`).
