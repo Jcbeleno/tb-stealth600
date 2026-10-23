@@ -3,6 +3,14 @@
 Linux control app for the **Turtle Beach Stealth 600 Gen 3 PC** headset (transmitter `10f5:224c`), a replacement for Swarm II.
 The protocol was reverse-engineered from Swarm II.
 
+![TB Stealth 600 app](docs/screenshot.png)
+
+| Chat-mix wheel on the headset, live in the app | Sections and transitions |
+|---|---|
+| ![wheel](docs/wheel.gif) | ![tour](docs/tour.gif) |
+
+Videos: [wheel.mp4](docs/wheel.mp4) · [tour.mp4](docs/tour.mp4)
+
 - `tb600.py`: library (HID RACE + CoAP: settings, EQ, custom presets, backup/restore)
 - `tbctl.py`: CLI (`tbctl show`, `tbctl set noise_gate on`, `tbctl eq game`, `tbctl watch`…)
 - `tb600d.py`: user service: live state over CoAP Observe, PipeWire DSP (game/chat mix, Superhuman Hearing, Chat Boost, 7.1 virtual surround with the SADIE II HRTF), battery alerts
