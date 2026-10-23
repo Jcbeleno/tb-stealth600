@@ -23,4 +23,12 @@ From a checkout, `./install.sh` installs that folder in place.
 
 Requires GTK ≥ 4.12 and libadwaita ≥ 1.5. The 3D surround uses HRIRs from SADIE II (Apache-2.0, see `assets/hrir/NOTICE`).
 
-Firmware updates are not implemented. The headset photos are © Turtle Beach: they are not in this repo, the installer downloads them from the Turtle Beach store (`tb600_views.py`).
+Firmware updates are not implemented.
+
+## Disclaimer
+
+Unofficial project, not affiliated with or endorsed by Turtle Beach Corporation. "Turtle Beach", "Stealth", "Swarm"
+and "Superhuman Hearing" are trademarks of Turtle Beach Corporation.
+
+The headset photos shown in the app are © Turtle Beach Corporation. They are **not** in this repository: the installer
+(`tb600_views.py`) downloads them for your own use from the Turtle Beach store, or from its Internet Archive copy.

@@ -762,6 +762,8 @@ class Window(Adw.ApplicationWindow):
         b = Gtk.ListBox(css_classes=["tb-list"], selection_mode=Gtk.SelectionMode.NONE)
         for r in self.info_rows.values():
             b.append(r)
+        b.append(Adw.ActionRow(title="FOTOS DEL HEADSET", subtitle="© Turtle Beach Corporation · app no oficial",
+                               css_classes=["property"]))
         return b
 
     def maintenance_list(self):

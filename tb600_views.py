@@ -4,12 +4,16 @@
 The photos are Turtle Beach's, so the repo does not carry them: install.sh runs this once. Each shot is
 cropped to the headset, scaled down, and the two shots the store crops at the frame get a soft edge.
 """
-import os, sys, urllib.request
+import os, sys, time, urllib.request
 import gi
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import GdkPixbuf, GLib
 
 CDN = "https://cdn.shopify.com/s/files/1/0556/5795/5430/files/"
+# Internet Archive copies of the same files (raw bytes via "id_"), used if the store moves or drops them
+MIRRORS = [CDN, "https://web.archive.org/web/2026id_/" + CDN]
+SIZES = {"stealth-600-PC-BLK.png": (1106, 840)}  # the crop boxes below are only valid for these sizes
+DEFAULT_SIZE = (2400, 1350)
 # view: (store file, crop x, y, w, h of the headset in that file, edge to fade where the store cut it)
 VIEWS = {
     "audio":       ("stealth-600-PC-BLK.png", 270, 49, 567, 742, None),
@@ -39,18 +43,35 @@ def fade(pb, edge):
                                            True, 8, w, h, stride)
 
 
+def download(name):
+    for base, attempt in ((b, a) for b in MIRRORS for a in range(1 if b == CDN else 3)):
+        if attempt:
+            time.sleep(10 * attempt)  # the Internet Archive refuses bursts of requests for a while
+        try:
+            req = urllib.request.Request(base + name, headers={"User-Agent": "Mozilla/5.0"})
+            data = urllib.request.urlopen(req, timeout=60).read()
+            loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+            loader.write(data)
+            loader.close()
+            pb = loader.get_pixbuf()
+        except Exception:  # network error, 404, not a PNG: try the next mirror
+            continue
+        if (pb.get_width(), pb.get_height()) == SIZES.get(name, DEFAULT_SIZE):
+            return pb
+    return None
+
+
 def fetch(outdir):
     os.makedirs(outdir, exist_ok=True)
     for view, (name, x, y, w, h, edge) in VIEWS.items():
         dest = os.path.join(outdir, view + ".png")
         if os.path.exists(dest):
             continue
-        req = urllib.request.Request(CDN + name, headers={"User-Agent": "Mozilla/5.0"})
-        data = urllib.request.urlopen(req, timeout=60).read()
-        loader = GdkPixbuf.PixbufLoader.new_with_type("png")
-        loader.write(data)
-        loader.close()
-        pb = loader.get_pixbuf().new_subpixbuf(x, y, w, h)
+        pb = download(name)
+        if pb is None:
+            print(f"{view}: no disponible", file=sys.stderr)
+            continue
+        pb = pb.new_subpixbuf(x, y, w, h)
         s = min(1.0, MAX / max(w, h))
         pb = pb.scale_simple(round(w * s), round(h * s), GdkPixbuf.InterpType.HYPER)
         if edge:
