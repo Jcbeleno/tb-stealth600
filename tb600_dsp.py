@@ -15,7 +15,8 @@ CACHE = os.path.expanduser("~/.cache/tb600")
 # SADIE II subject D1 (Neumann KU100), 48 kHz 256-tap HRIRs, Apache-2.0, University of York (installed by
 # install.sh). Replaced MIT KEMAR (1994, 44.1 kHz), whose measurement noise was audible as hiss.
 HRTF = os.path.expanduser("~/.local/share/tb600/hrtf/sadie2_d1_ku100_48k.sofa")
-HRIR_DIR = os.path.expanduser("~/.local/share/tb600/hrtf/hrir")  # per-angle WAVs made by tb600_hrir.py
+# per-angle WAVs cut from SADIE II (Apache-2.0) by tb600_hrir.py; shipped so installs need no SOFA/libmysofa
+HRIR_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets", "hrir")
 
 
 CHANNELS = ["FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR"]  # TB Game is a 7.1 sink, like Windows' endpoint
@@ -124,9 +125,6 @@ def _die_with_parent():
 def start(target, preset="game"):
     if preset not in SURROUND_PRESETS:
         preset = "game"
-    if not os.path.exists(os.path.join(HRIR_DIR, f"az{SURROUND_PRESETS[preset]['FL'] % 360:03d}.wav")):
-        import tb600_hrir  # first run: cut the per-angle IRs out of the SOFA file
-        tb600_hrir.extract(HRTF, {a % 360 for p in SURROUND_PRESETS.values() for a in p.values()}, HRIR_DIR)
     conf = write_conf(target, preset)
     subprocess.run(["pkill", "-f", f"^pipewire -c {conf}$"])  # leftovers from a crashed/killed run
     return subprocess.Popen(["pipewire", "-c", conf], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

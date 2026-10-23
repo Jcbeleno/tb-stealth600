@@ -11,12 +11,16 @@ The protocol was reverse-engineered from Swarm II.
 
 ## Install
 
+One command on any distro with systemd and PipeWire (Arch/CachyOS, Debian 13, Ubuntu 24.04+, Fedora 40+, openSUSE):
+
 ```sh
-sudo install -m644 70-tb-stealth600.rules /etc/udev/rules.d/
-./install.sh
-systemctl --user enable --now tb600d
+curl -fsSL https://raw.githubusercontent.com/Jcbeleno/tb-stealth600/main/install.sh | bash
 ```
 
-The 3D surround needs `~/.local/share/tb600/hrtf/sadie2_d1_ku100_48k.sofa` (SADIE II D1 KU100, Zenodo 10886409) and `libmysofa`.
+It installs the missing packages, the udev rule (sudo), the app in `~/.local/share/tb-stealth600`, the launcher and
+the `tb600d` user service. Run it again to update; `install.sh --uninstall` removes everything.
+From a checkout, `./install.sh` installs that folder in place.
+
+Requires GTK ≥ 4.12 and libadwaita ≥ 1.5. The 3D surround uses HRIRs from SADIE II (Apache-2.0, see `assets/hrir/NOTICE`).
 
 Firmware updates are not implemented. Product photos in `assets/` © Turtle Beach.

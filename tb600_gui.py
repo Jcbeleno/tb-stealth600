@@ -12,7 +12,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
-from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gsk, Gtk
 from tb600 import (EQ_LIMIT, GAME_EQ_PRESETS, MIC_EQ_PRESETS, SETTINGS, Headset)
 import tb600d
 
@@ -42,6 +42,8 @@ window { font-family: "Noto Sans"; }
 .tb-sidebar { background: #0d1014; border-right: 1px solid rgba(255,255,255,0.06); }
 .tb-device { background: radial-gradient(circle, rgba(255,255,255,0.16), rgba(255,255,255,0.0) 70%); }
 .tb-device-name { font-weight: 700; letter-spacing: 1px; }
+.tb-tabs > button { padding: 4px 16px; font-size: 12px; font-weight: 600; letter-spacing: 1px; }
+.tb-tabs > button:checked { background: rgba(77,252,228,0.18); color: #ffffff; }
 .tb-nav { background: rgba(255,255,255,0.03); border-radius: 999px; padding: 4px; }
 .tb-nav > button { border-radius: 999px; padding: 6px 14px; color: rgba(255,255,255,0.6);
                    transition: background 200ms ease-out, color 200ms ease-out; }
@@ -259,6 +261,25 @@ class HeadsetStage(Gtk.Widget):
              lb * (1 - sat), lb * (1 - sat), lb * (1 - sat) + sat, 0,
              0, 0, 0, 1]
         return Graphene.Matrix().init_from_float(m)
+
+
+class Tabs(Gtk.Box):
+    """Segmented switch with an "active-name" property (Adw.ToggleGroup needs libadwaita 1.7, too new for
+    Ubuntu 24.04 / Debian 12 era distros)."""
+    active_name = GObject.Property(type=str)
+
+    def __init__(self, items):
+        super().__init__(halign=Gtk.Align.CENTER, css_classes=["linked", "tb-tabs"])
+        first = None
+        for name, label in items:
+            b = Gtk.ToggleButton(label=label, group=first, active=first is None)
+            b.connect("toggled", lambda w, n=name: w.get_active() and self.set_property("active-name", n))
+            first = first or b
+            self.append(b)
+        self.active_name = items[0][0]
+
+    def get_active_name(self):
+        return self.active_name
 
 
 class EqGraph(Gtk.DrawingArea):
@@ -598,9 +619,7 @@ class Window(Adw.ApplicationWindow):
             lists.add_named(pl, which)
             if which == "mic":
                 self.mic_parts += [g, pl]
-        tabs = Adw.ToggleGroup(halign=Gtk.Align.CENTER, css_classes=["round"])
-        tabs.add(Adw.Toggle(name="game", label="SONIDO"))
-        tabs.add(Adw.Toggle(name="mic", label="MICRÓFONO"))
+        tabs = Tabs([("game", "SONIDO"), ("mic", "MICRÓFONO")])
         tabs.connect("notify::active-name", lambda t, _: (graphs.set_visible_child_name(t.get_active_name()),
                                                          lists.set_visible_child_name(t.get_active_name()),
                                                          self.focus_stage(self.left.get_visible_child_name()),

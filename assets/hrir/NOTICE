@@ -1,0 +1,3 @@
+az*.wav are head-related impulse responses cut from the SADIE II database (subject D1, Neumann KU100,
+48 kHz), University of York, https://zenodo.org/records/10886409, licensed under the Apache License 2.0.
+Regenerate with tb600_hrir.py from the original SOFA file.
