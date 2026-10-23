@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""tb600d: background service for the Stealth 600 Gen 3 PC.
+
+- runs the host DSP (TB Game / TB Chat sinks, see tb600_dsp.py)
+- follows headset state through CoAP Observe pushes, like Swarm (wheel, buttons, app changes
+  arrive within ~0.1 s) and re-applies the DSP
+- writes ~/.cache/tb600/state.json for the GUI and the Noctalia battery widget
+Local-only options (no headset key) live in ~/.config/tb600/config.json.
+"""
+import json, os, signal, subprocess, sys, time, zlib
+os.environ.setdefault("TB600_TRACE_LINK", "1")  # log raw 0x2CB1 link indications to the journal
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import tb600_dsp as dsp
+from tb600 import UPDATES, Headset, TBError, derive
+
+CONFIG = os.path.expanduser("~/.config/tb600/config.json")
+STATE = os.path.join(dsp.CACHE, "state.json")
+DEFAULTS = {"surround": False, "surround_preset": "game", "route_default": True, "battery_alerts": True}
+BATTERY_ALERTS = (15, 5)  # % thresholds, each notified once until the battery is back above the first
+LISTEN = 0.15  # s per push-listening slice (the hidraw lock is released between slices)
+INFO_EVERY = 600  # s between firmware RACE queries (battery/charging come as GSI pushes)
+RESUBSCRIBE_AFTER_LINK = 1.5  # s: subscriptions live in the headset and die when it powers off (swarm2linux)
+OBSERVE_EVERY = 1800  # s between full re-reads + Observe re-registration (safety net; link-up re-reads anyway)
+YIELD = 0.03  # s without the hidraw lock between listen slices, so the GUI/CLI get their turn quickly
+SKIP = ("Dbg", "Inf", "BT")  # BT holds live link stats that change every few seconds
+
+
+def load_config():
+    try:
+        return {**DEFAULTS, **json.load(open(CONFIG))}
+    except (OSError, ValueError):
+        return dict(DEFAULTS)
+
+
+def sinks():
+    out = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True).stdout
+    return [line.split("\t")[1] for line in out.splitlines() if "\t" in line]
+
+
+def headset_sink(names):
+    return next((n for n in names if "Turtle_Beach" in n and "Stealth_600" in n), None)
+
+
+def default_sink():
+    return subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True).stdout.strip()
+
+
+def sink_volume(name):
+    out = subprocess.run(["pactl", "get-sink-volume", name], capture_output=True, text=True).stdout
+    pct = [w for w in out.split() if w.endswith("%")]
+    return pct[0] if pct else "100%"
+
+
+VOLUMES = os.path.join(dsp.CACHE, "volumes.json")
+
+
+def load_volumes():
+    try:
+        return json.load(open(VOLUMES))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_volumes(v):
+    if v != load_volumes():
+        json.dump(v, open(VOLUMES, "w"))
+
+
+def write_state(st):
+    tmp = STATE + ".tmp"
+    json.dump(st, open(tmp, "w"))
+    os.replace(tmp, STATE)
+
+
+def spooled():
+    """Pushes that other processes (GUI/CLI) read off the shared buffer."""
+    tmp = UPDATES + ".reading"
+    try:
+        os.replace(UPDATES, tmp)
+    except OSError:
+        return []
+    out = []
+    for line in open(tmp):
+        try:
+            j = json.loads(line)
+            out.append((j["UP"], j["KVP"]))
+        except (ValueError, KeyError):
+            pass
+    os.remove(tmp)
+    return out
+
+
+def battery_alert(pct, cfg, notified, charging=False):
+    """Desktop notification when crossing a threshold (Swarm: CE_UPDATE_DEVICE_INFO LOW BATTERY)."""
+    if pct is None:
+        return
+    if pct > BATTERY_ALERTS[0] or charging:
+        notified.clear()
+        return
+    for th in BATTERY_ALERTS:
+        if pct <= th and th not in notified:
+            notified.add(th)
+            if cfg["battery_alerts"]:
+                subprocess.run(["notify-send", "-a", "TB Stealth 600", "-i", "battery-caution",
+                                "-u", "critical" if th <= 5 else "normal",
+                                f"Batería del headset al {pct}%", "Conecta el Stealth 600 para cargarlo."])
+
+
+def smooth_battery(shown, raw, charging):
+    """The gauge jitters ±1 %: only move in the direction the battery can go (down on battery, up while
+    charging); a jump of 3+ against it (charged elsewhere, battery swapped) is taken as real."""
+    if raw is None or shown is None:
+        return raw if raw is not None else shown
+    if charging:
+        return max(shown, raw) if raw > shown - 3 else raw
+    return min(shown, raw) if raw < shown + 3 else raw
+
+
+def token(group):
+    return zlib.crc32(group.encode()).to_bytes(4, "big")  # stable per group: re-observing replaces
+
+
+def main():
+    os.makedirs(dsp.CACHE, exist_ok=True)
+    proc, h, prev_default, hw_vol, sink = None, None, None, None, None
+    applied, info, info_t, groups, obs_t, last_write, sink_t = None, {}, 0, {}, 0, 0, 0
+    link = True  # assumed until a 0x2CB1 indication says otherwise
+    shown_bat = None
+    dsp_preset = None
+    eq_check = {}
+    running = True
+    notified = set()
+
+    def stop(*_):
+        nonlocal running
+        running = False
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    while running:
+        cfg = load_config()
+        st = {"connected": False, "time": time.time()}
+        changed = due = False
+        try:
+            if time.time() - sink_t > 2:  # pactl is a subprocess: don't run it every listen slice
+                names, sink_t = sinks(), time.time()
+                sink = headset_sink(names)
+                if "tb600_game" in names and "tb600_chat" in names:
+                    save_volumes({s: sink_volume(s) for s in ("tb600_game", "tb600_chat")})
+                    if sink and sink_volume(sink) != "100%":
+                        # the user's volume lives on the virtual sinks; anything below 100% here (an audio-stack
+                        # restart, WirePlumber restoring an old value) would silently attenuate everything twice
+                        subprocess.run(["pactl", "set-sink-volume", sink, "100%"])
+                if proc and proc.poll() is None and (not sink or "tb600_game" not in names
+                                                     or "tb600_chat" not in names):
+                    # the transmitter re-enumerated (mode switch, replug): the old graph lost its target
+                    print("DSP sinks missing: restarting the DSP", flush=True)
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                    proc = None
+                if cfg["route_default"] and sink and default_sink() not in ("tb600_game",):
+                    prev_default = prev_default or default_sink()
+                    subprocess.run(["pactl", "set-default-sink", "tb600_game"])
+            if not sink:
+                raise TBError("headset sink not present")
+            if proc and proc.poll() is None and cfg["surround_preset"] != dsp_preset:
+                proc.terminate()  # 3D speaker angles live in the convolvers: rebuild the graph (~1 s gap)
+                proc.wait(timeout=5)
+                proc = None
+            if proc is None or proc.poll() is not None:
+                dsp_preset = cfg["surround_preset"]
+                proc = dsp.start(sink, dsp_preset)
+                applied = None
+                time.sleep(1.5)
+                # Like Windows' Game/Chat endpoints: the user's volume lives on TB Game (the default sink),
+                # the hardware sink sits at 100% so TB Game can reach full loudness. Restored on exit.
+                hw_vol = hw_vol or sink_volume(sink)
+                saved = load_volumes()  # user volumes survive DSP/daemon restarts; first run inherits the headset's
+                for s in ("tb600_game", "tb600_chat"):
+                    subprocess.run(["pactl", "set-sink-volume", s, saved.get(s, hw_vol)])
+                subprocess.run(["pactl", "set-sink-volume", sink, "100%"])
+            if h is None:
+                h = Headset()
+                # Swarm writes Swm.500=1 on connect / 0 on exit: "host app present".
+                # Without it the wheel's game/chat mix is never reported in Swm.510.
+                h.write_raw("500", "1")
+                obs_t = 0
+            if time.time() - obs_t > OBSERVE_EVERY:
+                groups = {g: h.read(g, observe=0, token=token(g)) for g in h.groups() if g not in SKIP}
+                obs_t, changed = time.time(), True
+            if time.time() - info_t > INFO_EVERY:
+                info, info_t, changed = h.info(), time.time(), True
+            pushes = h.updates(LISTEN) + spooled()
+            time.sleep(YIELD)  # flock isn't fair: give waiting writers (GUI, tbctl) the device now
+            for g, kvp in pushes:
+                if g in ("AQG", "AQM") and ({"1210", "1310"} & kvp.keys()):
+                    eq_check[g] = time.time() + 0.4  # preset switched: re-read the whole EQ shortly after
+                if g == "__LINK__":
+                    link = kvp["up"]
+                    print(f"headset link {'up: resubscribing' if link else 'down'}", flush=True)
+                    if link:  # headset (re)connected: subscribe again shortly, refresh firmware/battery
+                        obs_t, info_t = time.time() - OBSERVE_EVERY + RESUBSCRIBE_AFTER_LINK, 0
+                else:
+                    groups.setdefault(g, {}).update(kvp)
+                changed = True
+            for g, t_due in list(eq_check.items()):
+                if time.time() >= t_due:
+                    del eq_check[g]
+                    fresh = h.read(g)
+                    if fresh != {k: v for k, v in groups.get(g, {}).items() if k in fresh}:
+                        print(f"{g}: missed push corrected", flush=True)
+                    groups.setdefault(g, {}).update(fresh)
+                    changed = True
+            due = changed or time.time() - last_write > 1
+            if due:
+                settings, eq, custom = derive(groups)
+                charging = bool(settings.get("charging"))
+                raw = settings.get("battery")
+                raw = raw if raw is not None and 0 <= raw <= 100 else info.get("battery")
+                bat = shown_bat = smooth_battery(shown_bat, raw, charging)
+                battery_alert(bat, cfg, notified, charging)
+                st.update(connected=True, **{**info, "battery": bat}, charging=charging, headset_link=link,
+                          settings=settings, eq=eq, custom=custom, surround=cfg["surround"])
+                want = {k: settings[k] for k in ("chat_mix", "shh", "shh_level", "shh_preset", "chat_boost")}
+                want.update(surround=cfg["surround"], surround_preset=cfg["surround_preset"])
+                if want != applied and dsp.apply(want):
+                    applied = want
+        except TBError as e:
+            st["error"] = str(e)
+            if h:
+                h.close()
+            h, info_t, sink_t, due = None, 0, 0, True
+            time.sleep(1)
+        if due:
+            write_state(st)
+            last_write = time.time()
+
+    if h:
+        try:
+            for g in groups:
+                h.read(g, observe=1, token=token(g))  # cancel our subscriptions
+            h.write_raw("500", "0")
+        except TBError:
+            pass
+    if prev_default:
+        subprocess.run(["pactl", "set-default-sink", prev_default])
+    if sink:  # hand the user's game volume back to the hardware sink (it sat at 100% while we ran)
+        subprocess.run(["pactl", "set-sink-volume", sink, load_volumes().get("tb600_game", hw_vol or "50%")])
+    if proc and proc.poll() is None:
+        proc.terminate()
+
+
+if __name__ == "__main__":
+    main()

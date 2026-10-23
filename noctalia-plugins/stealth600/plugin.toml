@@ -1,0 +1,16 @@
+# Batería del Turtle Beach Stealth 600 Gen 3 en la barra. Lee el estado que escribe
+# tb600d (~/.cache/tb600/state.json); al hacer clic abre la app TB Stealth 600.
+
+id = "jucabego/stealth600"
+name = "Stealth 600"
+version = "1.0.0"
+plugin_api = 9
+author = "jucabego"
+license = "MIT"
+tags = ["audio", "battery"]
+icon = "headphones"
+description = "Batería y estado del Turtle Beach Stealth 600 Gen 3 (tb600d)."
+
+[[widget]]
+id = "battery"
+entry = "widget.luau"
