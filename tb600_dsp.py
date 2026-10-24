@@ -126,14 +126,26 @@ def start(target, preset="game"):
     if preset not in SURROUND_PRESETS:
         preset = "game"
     conf = write_conf(target, preset)
+    _ids.clear()
     subprocess.run(["pkill", "-f", f"^pipewire -c {conf}$"])  # leftovers from a crashed/killed run
     return subprocess.Popen(["pipewire", "-c", conf], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             preexec_fn=_die_with_parent)
 
 
+PW_TIMEOUT = 2  # s; pw-dump/pw-cli/pactl hang forever when PipeWire stops answering
+_ids = {}  # node name -> id; only valid for the DSP instance start() launched
+
+
 def node_id(name):
-    for o in json.loads(subprocess.run(["pw-dump"], capture_output=True, text=True).stdout or "[]"):
+    if name in _ids:
+        return _ids[name]
+    try:  # pw-dump walks the whole graph: slow, and stuck if any client is unresponsive -> once per DSP start
+        dump = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=PW_TIMEOUT).stdout
+    except subprocess.TimeoutExpired:
+        return None
+    for o in json.loads(dump or "[]"):
         if o.get("type") == "PipeWire:Interface:Node" and o.get("info", {}).get("props", {}).get("node.name") == name:
+            _ids[name] = o["id"]
             return o["id"]
     return None
 
@@ -143,8 +155,11 @@ def set_controls(name, params):
     if nid is None:
         return False
     flat = " ".join(f'"{k}" {float(v)}' for k, v in params.items())
-    subprocess.run(["pw-cli", "set-param", str(nid), "Props", f"{{ params = [ {flat} ] }}"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(["pw-cli", "set-param", str(nid), "Props", f"{{ params = [ {flat} ] }}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=PW_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False
     return True
 
 

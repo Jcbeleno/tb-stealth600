@@ -44,6 +44,10 @@ def _locked(fn):
         try:
             return fn(self, *a, **k)
         finally:
+            # a push read in the same report as our response stays in self.buf: hand it to tb600d now,
+            # not at this process's next transaction (or never, if it exits)
+            for p in self.packets(0):
+                self._spill(p)
             fcntl.flock(self.fd, fcntl.LOCK_UN)
     return w
 

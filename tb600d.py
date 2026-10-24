@@ -32,8 +32,13 @@ def load_config():
         return dict(DEFAULTS)
 
 
+def pactl(*args):
+    # a wedged PipeWire/pipewire-pulse hangs pactl forever: never let it freeze the headset loop
+    return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=dsp.PW_TIMEOUT).stdout
+
+
 def sinks():
-    out = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True).stdout
+    out = pactl("list", "short", "sinks")
     return [line.split("\t")[1] for line in out.splitlines() if "\t" in line]
 
 
@@ -42,11 +47,11 @@ def headset_sink(names):
 
 
 def default_sink():
-    return subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True).stdout.strip()
+    return pactl("get-default-sink").strip()
 
 
 def sink_volume(name):
-    out = subprocess.run(["pactl", "get-sink-volume", name], capture_output=True, text=True).stdout
+    out = pactl("get-sink-volume", name)
     pct = [w for w in out.split() if w.endswith("%")]
     return pct[0] if pct else "100%"
 
@@ -127,6 +132,7 @@ def main():
     link = True  # assumed until a 0x2CB1 indication says otherwise
     shown_bat = None
     dsp_preset = None
+    init_vol, apply_t = False, 0
     eq_check = {}
     running = True
     notified = set()
@@ -141,6 +147,7 @@ def main():
         cfg = load_config()
         st = {"connected": False, "time": time.time()}
         changed = due = False
+        want = None
         try:
             if time.time() - sink_t > 2:  # pactl is a subprocess: don't run it every listen slice
                 names, sink_t = sinks(), time.time()
@@ -150,7 +157,7 @@ def main():
                     if sink and sink_volume(sink) != "100%":
                         # the user's volume lives on the virtual sinks; anything below 100% here (an audio-stack
                         # restart, WirePlumber restoring an old value) would silently attenuate everything twice
-                        subprocess.run(["pactl", "set-sink-volume", sink, "100%"])
+                        pactl("set-sink-volume", sink, "100%")
                 if proc and proc.poll() is None and (not sink or "tb600_game" not in names
                                                      or "tb600_chat" not in names):
                     # the transmitter re-enumerated (mode switch, replug): the old graph lost its target
@@ -160,7 +167,7 @@ def main():
                     proc = None
                 if cfg["route_default"] and sink and default_sink() not in ("tb600_game",):
                     prev_default = prev_default or default_sink()
-                    subprocess.run(["pactl", "set-default-sink", "tb600_game"])
+                    pactl("set-default-sink", "tb600_game")
             if not sink:
                 raise TBError("headset sink not present")
             if proc and proc.poll() is None and cfg["surround_preset"] != dsp_preset:
@@ -170,15 +177,17 @@ def main():
             if proc is None or proc.poll() is not None:
                 dsp_preset = cfg["surround_preset"]
                 proc = dsp.start(sink, dsp_preset)
-                applied = None
+                applied, init_vol = None, True
                 time.sleep(1.5)
+            if init_vol and time.time() >= sink_t:  # retried until pactl answers: never leave TB Game at a default volume
                 # Like Windows' Game/Chat endpoints: the user's volume lives on TB Game (the default sink),
                 # the hardware sink sits at 100% so TB Game can reach full loudness. Restored on exit.
                 hw_vol = hw_vol or sink_volume(sink)
                 saved = load_volumes()  # user volumes survive DSP/daemon restarts; first run inherits the headset's
                 for s in ("tb600_game", "tb600_chat"):
-                    subprocess.run(["pactl", "set-sink-volume", s, saved.get(s, hw_vol)])
-                subprocess.run(["pactl", "set-sink-volume", sink, "100%"])
+                    pactl("set-sink-volume", s, saved.get(s, hw_vol))
+                pactl("set-sink-volume", sink, "100%")
+                init_vol = False
             if h is None:
                 h = Headset()
                 # Swarm writes Swm.500=1 on connect / 0 on exit: "host app present".
@@ -223,17 +232,21 @@ def main():
                           settings=settings, eq=eq, custom=custom, surround=cfg["surround"])
                 want = {k: settings[k] for k in ("chat_mix", "shh", "shh_level", "shh_preset", "chat_boost")}
                 want.update(surround=cfg["surround"], surround_preset=cfg["surround_preset"])
-                if want != applied and dsp.apply(want):
-                    applied = want
         except TBError as e:
             st["error"] = str(e)
             if h:
                 h.close()
             h, info_t, sink_t, due = None, 0, 0, True
             time.sleep(1)
+        except subprocess.TimeoutExpired as e:
+            print(f"{e.cmd[0]} timed out: PipeWire not answering, audio checks paused 10 s", flush=True)
+            sink_t = time.time() + 10
         if due:
             write_state(st)
             last_write = time.time()
+        # after the state write, so a slow PipeWire never delays what the GUI shows
+        if want and want != applied and time.time() >= apply_t:
+            applied, apply_t = (want, 0) if dsp.apply(want) else (applied, time.time() + 3)
 
     if h:
         try:
@@ -242,10 +255,13 @@ def main():
             h.write_raw("500", "0")
         except TBError:
             pass
-    if prev_default:
-        subprocess.run(["pactl", "set-default-sink", prev_default])
-    if sink:  # hand the user's game volume back to the hardware sink (it sat at 100% while we ran)
-        subprocess.run(["pactl", "set-sink-volume", sink, load_volumes().get("tb600_game", hw_vol or "50%")])
+    try:
+        if prev_default:
+            pactl("set-default-sink", prev_default)
+        if sink:  # hand the user's game volume back to the hardware sink (it sat at 100% while we ran)
+            pactl("set-sink-volume", sink, load_volumes().get("tb600_game", hw_vol or "50%"))
+    except subprocess.TimeoutExpired:
+        pass
     if proc and proc.poll() is None:
         proc.terminate()
 
