@@ -474,7 +474,7 @@ class Window(Adw.ApplicationWindow):
             [("Micrófono", ["mic_mute", "mic_sensitivity", "mic_monitor"])],
             [("Noise gate", ["noise_gate", "noise_gate_level"])],
         ])
-        self.add_page("controls", "Controles", "input-gaming-symbolic", [
+        self.add_page("controls", "Controles", "applications-games-symbolic", [
             [("PC", ["button", "wheel"])],
             [("Xbox", ["button_xbox", "wheel_xbox"])],
         ])
