@@ -50,6 +50,19 @@ def default_sink():
     return pactl("get-default-sink").strip()
 
 
+def fade(sink, up):
+    """Short volume ramp + mute on the hardware sink. While the DSP is rebuilt, TB Game is gone and apps fall back to
+    the hardware sink, which sits at 100%: unmuted, that is a loud burst of unprocessed audio."""
+    if up:
+        pactl("set-sink-volume", sink, "0%")
+        pactl("set-sink-mute", sink, "0")
+    for v in ((25, 50, 75, 100) if up else (75, 50, 25, 0)):
+        pactl("set-sink-volume", sink, f"{v}%")
+        time.sleep(0.03)
+    if not up:
+        pactl("set-sink-mute", sink, "1")
+
+
 def sink_volume(name):
     out = pactl("get-sink-volume", name)
     pct = [w for w in out.split() if w.endswith("%")]
@@ -127,12 +140,12 @@ def token(group):
 
 def main():
     os.makedirs(dsp.CACHE, exist_ok=True)
-    proc, h, prev_default, hw_vol, sink = None, None, None, None, None
+    proc, base, h, prev_default, hw_vol, sink = None, None, None, None, None, None
     applied, info, info_t, groups, obs_t, last_write, sink_t = None, {}, 0, {}, 0, 0, 0
     link = True  # assumed until a 0x2CB1 indication says otherwise
     shown_bat = None
     dsp_preset = None
-    init_vol, apply_t = False, 0
+    init_vol, apply_t, muted = False, 0, 0
     eq_check = {}
     running = True
     notified = set()
@@ -158,26 +171,38 @@ def main():
                         # the user's volume lives on the virtual sinks; anything below 100% here (an audio-stack
                         # restart, WirePlumber restoring an old value) would silently attenuate everything twice
                         pactl("set-sink-volume", sink, "100%")
-                if proc and proc.poll() is None and (not sink or "tb600_game" not in names
-                                                     or "tb600_chat" not in names):
+                if base and (not sink or "tb600_game" not in names or "tb600_chat" not in names):
                     # the transmitter re-enumerated (mode switch, replug): the old graph lost its target
                     print("DSP sinks missing: restarting the DSP", flush=True)
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                    proc = None
+                    for p in [proc, *base]:
+                        if p and p.poll() is None:
+                            p.terminate()
+                            p.wait(timeout=5)
+                    proc, base = None, None
                 if cfg["route_default"] and sink and default_sink() not in ("tb600_game",):
                     prev_default = prev_default or default_sink()
                     pactl("set-default-sink", "tb600_game")
             if not sink:
                 raise TBError("headset sink not present")
-            if proc and proc.poll() is None and cfg["surround_preset"] != dsp_preset:
-                proc.terminate()  # 3D speaker angles live in the convolvers: rebuild the graph (~1 s gap)
+            want_preset = cfg["surround_preset"] if cfg["surround"] else None  # 3D off: graph without convolvers
+            if base is None or any(p.poll() is not None for p in base):
+                for p in [proc, *(base or [])]:
+                    if p and p.poll() is None:
+                        p.terminate()
+                proc, base = None, dsp.start_sinks(sink)
+                init_vol = True
+            if proc and proc.poll() is None and want_preset != dsp_preset:
+                # 3D speaker angles live in the convolvers: rebuild the game DSP (~1 s gap). TB Game stays, so
+                # players keep their stream; the ramp avoids a click where the old graph is cut off
+                fade(sink, up=False)
+                muted = time.time() + 4  # unmuted once the new graph has its controls (or after 4 s regardless)
+                proc.terminate()
                 proc.wait(timeout=5)
                 proc = None
             if proc is None or proc.poll() is not None:
-                dsp_preset = cfg["surround_preset"]
-                proc = dsp.start(sink, dsp_preset)
-                applied, init_vol = None, True
+                dsp_preset = want_preset
+                proc = dsp.start_fx(sink, dsp_preset)
+                applied = None
                 time.sleep(1.5)
             if init_vol and time.time() >= sink_t:  # retried until pactl answers: never leave TB Game at a default volume
                 # Like Windows' Game/Chat endpoints: the user's volume lives on TB Game (the default sink),
@@ -247,6 +272,12 @@ def main():
         # after the state write, so a slow PipeWire never delays what the GUI shows
         if want and want != applied and time.time() >= apply_t:
             applied, apply_t = (want, 0) if dsp.apply(want) else (applied, time.time() + 3)
+        if muted and sink and (applied == want or time.time() > muted):
+            try:
+                fade(sink, up=True)
+                muted = 0
+            except subprocess.TimeoutExpired:
+                pass
 
     if h:
         try:
@@ -260,10 +291,13 @@ def main():
             pactl("set-default-sink", prev_default)
         if sink:  # hand the user's game volume back to the hardware sink (it sat at 100% while we ran)
             pactl("set-sink-volume", sink, load_volumes().get("tb600_game", hw_vol or "50%"))
+            if muted:  # stopped mid 3D switch
+                pactl("set-sink-mute", sink, "0")
     except subprocess.TimeoutExpired:
         pass
-    if proc and proc.poll() is None:
-        proc.terminate()
+    for p in [proc, *(base or [])]:
+        if p and p.poll() is None:
+            p.terminate()
 
 
 if __name__ == "__main__":

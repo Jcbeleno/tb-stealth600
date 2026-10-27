@@ -1,8 +1,8 @@
 """Host-side DSP that Swarm II delegates to the Waves APO on Windows.
 
-Runs a private `pipewire -c <conf>` process with two filter-chain sinks feeding the headset:
-  TB Game : low shelf + peaking (Superhuman Hearing) -> optional crossfeed virtual speakers (Waves 3D)
-  TB Chat : high-pass + presence peak (Chat Boost)
+Two sinks feed the headset (start_sinks), and the game DSP runs behind TB Game in its own process (start_fx):
+  TB Game : 7.1 sink -> its monitor -> virtual speakers (Waves 3D) or downmix -> low shelf + peaking (Superhuman Hearing)
+  TB Chat : filter-chain sink, high-pass + presence peak (Chat Boost)
 Game/chat mix scales the two chains like the wheel does on Windows.
 Shortcut: SHH/chat-boost/3D curves approximate Waves by ear; Waves' real filters are not in the binaries.
 """
@@ -33,18 +33,19 @@ def hrir_scale():
 
 
 def _game_nodes(preset):
-    """7.1 in -> per-channel virtual speaker (SADIE II HRIR convolution) or plain downmix -> SHH EQ -> 2 ears."""
+    """7.1 in -> per-channel virtual speaker (SADIE II HRIR convolution) or plain downmix -> SHH EQ -> 2 ears.
+    preset None (3D off): no convolvers in the graph, so they don't run on every quantum for a muted wet path."""
     n, links = [], []
     gain = hrir_scale()
     for ch in CHANNELS:
         n.append(f'{{ type = builtin name = in{ch} label = copy }}')
-        if ch != "LFE":
+        if ch != "LFE" and preset:
             ir = os.path.join(HRIR_DIR, f"az{SURROUND_PRESETS[preset][ch] % 360:03d}.wav")
             for i, ear in enumerate("LR"):
                 n.append(f'{{ type = builtin name = cv{ch}{ear} label = convolver config = {{ filename = "{ir}" '
                          f'channel = {i} gain = {gain} }} }}')
                 links.append(f'{{ output = "in{ch}:Out" input = "cv{ch}{ear}:In" }}')
-    spk = [c for c in CHANNELS if c != "LFE"]
+    spk = [c for c in CHANNELS if c != "LFE"] if preset else []
     for e, ear in enumerate("LR"):
         n.append(f'{{ type = builtin name = dry{ear} label = mixer }}')  # In 1..8 = CHANNELS
         n.append(f'{{ type = builtin name = wet{ear} label = mixer }}')  # In 1..7 = speakers, In 8 = LFE
@@ -78,8 +79,11 @@ def _chat_nodes():
     return n, links, ['"hpL:In"', '"hpR:In"'], ['"volL:Out"', '"volR:Out"']
 
 
-def _chain(name, desc, target, parts, positions=("FL", "FR")):
+def _chain(name, desc, target, parts, positions=("FL", "FR"), source=None):
+    """source: capture that sink's monitor (a stream) instead of being a sink."""
     nodes, links, ins, outs = parts
+    capture = (f'stream.capture.sink = true target.object = "{source}" node.passive = true' if source
+               else "media.class = Audio/Sink")
     return f"""  {{ name = libpipewire-module-filter-chain
     args = {{
       node.description = "{desc}"
@@ -90,7 +94,7 @@ def _chain(name, desc, target, parts, positions=("FL", "FR")):
         inputs = [ {' '.join(ins)} ]
         outputs = [ {' '.join(outs)} ]
       }}
-      capture.props = {{ node.name = "{name}" media.class = Audio/Sink audio.channels = {len(positions)}
+      capture.props = {{ node.name = "{name}" {capture} audio.channels = {len(positions)}
                          audio.position = [ {" ".join(positions)} ] }}
       playback.props = {{ node.name = "{name}_out" node.passive = true audio.channels = 2 audio.position = [ FL FR ]
                           target.object = "{target}" }}
@@ -98,9 +102,9 @@ def _chain(name, desc, target, parts, positions=("FL", "FR")):
   }}"""
 
 
-def write_conf(target, preset="game"):
+def write_conf(name, chain):
     os.makedirs(CACHE, exist_ok=True)
-    path = os.path.join(CACHE, "dsp.conf")
+    path = os.path.join(CACHE, name)
     conf = f"""context.properties = {{ log.level = 2 }}
 context.spa-libs = {{ audio.convert.* = audioconvert/libspa-audioconvert support.* = support/libspa-support }}
 context.modules = [
@@ -108,8 +112,7 @@ context.modules = [
   {{ name = libpipewire-module-protocol-native }}
   {{ name = libpipewire-module-client-node }}
   {{ name = libpipewire-module-adapter }}
-{_chain("tb600_game", GAME_NAME, target, _game_nodes(preset), CHANNELS)}
-{_chain("tb600_chat", CHAT_NAME, target, _chat_nodes())}
+{chain}
 ]
 """
     open(path, "w").write(conf)
@@ -122,14 +125,32 @@ def _die_with_parent():
     ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)
 
 
-def start(target, preset="game"):
-    if preset not in SURROUND_PRESETS:
-        preset = "game"
-    conf = write_conf(target, preset)
-    _ids.clear()
+def _pipewire(conf):
     subprocess.run(["pkill", "-f", f"^pipewire -c {conf}$"])  # leftovers from a crashed/killed run
     return subprocess.Popen(["pipewire", "-c", conf], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             preexec_fn=_die_with_parent)
+
+
+def start_sinks(target):
+    """The sinks apps play to; they outlive DSP rebuilds (start_fx), so players never see their device vanish
+    (some pause when it does). TB Game is a plain 7.1 sink in the main PipeWire daemon, owned by a pw-cli kept
+    open: it goes away with that process. Its volume also applies to its monitor, which start_fx captures."""
+    cli = subprocess.Popen(["pw-cli"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           text=True, preexec_fn=_die_with_parent)
+    cli.stdin.write(f'create-node adapter {{ factory.name = support.null-audio-sink node.name = "tb600_game" '
+                    f'node.description = "{GAME_NAME}" media.class = Audio/Sink audio.channels = {len(CHANNELS)} '
+                    f'audio.position = [ {" ".join(CHANNELS)} ] monitor.channel-volumes = true }}\n')
+    cli.stdin.flush()  # stdin stays open: pw-cli (and the sink) live until terminated
+    return [cli, _pipewire(write_conf("chat.conf", _chain("tb600_chat", CHAT_NAME, target, _chat_nodes())))]
+
+
+def start_fx(target, preset="game"):
+    """Game DSP behind TB Game. preset: a SURROUND_PRESETS key with 3D on, None with 3D off."""
+    if preset is not None and preset not in SURROUND_PRESETS:
+        preset = "game"
+    _ids.clear()
+    return _pipewire(write_conf("game.conf", _chain("tb600_game_fx", GAME_NAME, target, _game_nodes(preset),
+                                                    CHANNELS, source="tb600_game")))
 
 
 PW_TIMEOUT = 2  # s; pw-dump/pw-cli/pactl hang forever when PipeWire stops answering
@@ -196,7 +217,7 @@ def apply(st):
     preset = st.get("surround_preset") if st.get("surround_preset") in SURROUND_PRESETS else "game"
     on = bool(st.get("surround"))
     comp_low, comp_f, comp_peak, comp_q = SURROUND_COMP
-    g = {}  # speaker angles are baked into the convolvers (start(preset)); tb600d restarts on preset change
+    g = {}  # speaker angles are baked into the convolvers (start(preset)); tb600d restarts on preset or 3D change
     for e, ear in enumerate("LR"):
         for i, ch in enumerate(CHANNELS, 1):
             g[f"dry{ear}:Gain {i}"] = DOWNMIX[ch][e]
@@ -216,4 +237,4 @@ def apply(st):
         c_.update({f"hp{c}:Freq": 100.0 if st.get("chat_boost") else 20.0,
                    f"pres{c}:Freq": 2500.0, f"pres{c}:Q": 0.6,
                    f"pres{c}:Gain": 4.0 if st.get("chat_boost") else 0.0, f"vol{c}:Mult": chat})
-    return set_controls("tb600_game", g) and set_controls("tb600_chat", c_)
+    return set_controls("tb600_game_fx", g) and set_controls("tb600_chat", c_)
