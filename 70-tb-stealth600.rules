@@ -1,2 +1,7 @@
 # Turtle Beach Stealth 600 Gen 3 PC transmitter: give the logged-in user access to hidraw
 KERNEL=="hidraw*", ATTRS{idVendor}=="10f5", ATTRS{idProduct}=="224c", TAG+="uaccess"
+
+# Transmitter power-up: its bootloader (0e8d:0003) shows first; hold back interface drivers on that
+# bus so the high-speed instance does not hang ~85 s on audio probing (see tb600-usbfix)
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="0003", RUN+="/usr/local/lib/tb-stealth600/usbfix arm %p"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{authorized}=="0", RUN+="/usr/local/lib/tb-stealth600/usbfix iface %p"

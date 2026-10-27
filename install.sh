@@ -12,6 +12,7 @@ BIN=$HOME/.local/bin
 UNIT=$HOME/.config/systemd/user/tb600d.service
 DESKTOP=$HOME/.local/share/applications/dev.jucabego.TBStealth600.desktop
 RULE=/etc/udev/rules.d/70-tb-stealth600.rules
+USBFIX=/usr/local/lib/tb-stealth600/usbfix
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -22,6 +23,7 @@ if [ "${1:-}" = "--uninstall" ]; then
   rm -f "$UNIT" "$DESKTOP" "$BIN/tbctl" "$BIN/tb600d" "$BIN/tb600-gui"
   systemctl --user daemon-reload
   [ -f "$RULE" ] && sudo_ rm -f "$RULE" && sudo_ udevadm control --reload
+  [ -f "$USBFIX" ] && sudo_ rm -rf "$(dirname "$USBFIX")"
   rm -rf "$APP"
   say "Desinstalado. Los ajustes siguen en ~/.config/tb600 y en el propio headset."
   exit 0
@@ -76,9 +78,10 @@ if ! deps_ok; then
 fi
 pactl info 2>/dev/null | grep -q PipeWire || die "el audio no corre sobre PipeWire (pactl info no lo muestra)."
 
-# --- udev: let the logged-in user open the transmitter's hidraw node ---
-if ! cmp -s "$APP/70-tb-stealth600.rules" "$RULE" 2>/dev/null; then
+# --- udev: let the logged-in user open the transmitter's hidraw node; fast reconnect (tb600-usbfix) ---
+if ! cmp -s "$APP/70-tb-stealth600.rules" "$RULE" 2>/dev/null || ! cmp -s "$APP/tb600-usbfix" "$USBFIX" 2>/dev/null; then
   say "Instalando la regla udev (pedirá tu contraseña)"
+  sudo_ install -Dm755 "$APP/tb600-usbfix" "$USBFIX"
   sudo_ install -m644 "$APP/70-tb-stealth600.rules" "$RULE"
   sudo_ udevadm control --reload
   sudo_ udevadm trigger --subsystem-match=hidraw --action=change
