@@ -1,10 +1,11 @@
 #!/bin/sh
 # Run by udev (70-tb-stealth600.rules) as root.
 # After power-up the transmitter enumerates high-speed, where its audio interfaces never answer
-# (-110); once its HID interface is probed it reboots into full-speed, where everything works.
-# The kernel probes audio first, so the HID probe only comes ~85 s later. While armed (from the
-# transmitter's bootloader appearing until it is back at full speed, 20 s at most) new interfaces
-# on that bus are held back and bound here, skipping audio on the high-speed instance.
+# (-110); once its HID interface is up, the first audio request makes it reboot into full-speed,
+# where everything works (HID alone does not: it stays high-speed). The kernel probes audio first,
+# so the reboot only came ~85 s later. While armed (from the transmitter's bootloader appearing until
+# it is back at full speed, 20 s at most) new interfaces on that bus are held back and bound here:
+# HID first, then audio.
 #   arm <bootloader devpath> | iface <interface devpath> | disarm <busnum>
 set -u
 S=/sys/bus/usb
@@ -25,14 +26,17 @@ case $1 in
 arm)
   bus=$(cat "/sys$2/busnum")
   echo 0 > $S/devices/usb$bus/interface_authorized_default
-  systemd-run --no-block --collect --on-active=20 "$0" disarm "$bus" ;;
+  systemd-run --no-block --collect --on-active=20 --timer-property=AccuracySec=100ms "$0" disarm "$bus" ;;
 disarm)
   disarm "$2" ;;
 iface)
   i=/sys$2; d=${i%/*}
   if [ "$(cat "$d/idVendor"):$(cat "$d/idProduct")" = 10f5:224c ]; then
     if [ "$(cat "$d/speed")" = 480 ]; then
-      [ "${i##*.}" = 3 ] && echo 1 > "$i/authorized" && echo "${i##*/}" > $S/drivers_probe
+      if [ "${i##*.}" = 3 ]; then
+        echo 1 > "$i/authorized" && echo "${i##*/}" > $S/drivers_probe
+        disarm "$(cat "$d/busnum")"  # HID is up: the first audio request now makes it reboot into full-speed
+      fi
     else
       disarm "$(cat "$d/busnum")"
     fi
