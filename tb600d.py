@@ -84,6 +84,25 @@ def save_volumes(v):
         json.dump(v, open(VOLUMES, "w"))
 
 
+RAM = os.path.join(dsp.CACHE, "headset_ram.json")
+# kept only in headset RAM: after power-off the name is back to "My Headset" and the game/chat mix to 0 (chat silent)
+RAM_KEYS = {"220": "GSI", "510": "Swm"}
+RAM_DEFAULTS = {"510": "50"}
+
+
+def load_ram():
+    try:
+        return {**RAM_DEFAULTS, **json.load(open(RAM))}
+    except (OSError, ValueError):
+        return dict(RAM_DEFAULTS)
+
+
+def save_ram(groups):
+    ram = {k: groups[g][k] for k, g in RAM_KEYS.items() if k in groups.get(g, {})}
+    if ram != load_ram():
+        json.dump(ram, open(RAM, "w"))
+
+
 def write_state(st):
     tmp = STATE + ".tmp"
     json.dump(st, open(tmp, "w"))
@@ -215,12 +234,17 @@ def main():
                 init_vol = False
             if h is None:
                 h = Headset()
-                # Swarm writes Swm.500=1 on connect / 0 on exit: "host app present".
-                # Without it the wheel's game/chat mix is never reported in Swm.510.
-                h.write_raw("500", "1")
                 obs_t = 0
-            if time.time() - obs_t > OBSERVE_EVERY:
+            if time.time() - obs_t > OBSERVE_EVERY:  # also right after connect and after every headset link-up
+                # Swarm writes Swm.500=1 on connect / 0 on exit: "host app present". Without it the wheel's
+                # game/chat mix is never reported in Swm.510. It lives in headset RAM (see RAM_KEYS): lost when
+                # the headset powers off
+                h.write_raw("500", "1")
                 groups = {g: h.read(g, observe=0, token=token(g)) for g in h.groups() if g not in SKIP}
+                for k, v in load_ram().items():
+                    if k in groups.get(RAM_KEYS[k], {}) and groups[RAM_KEYS[k]][k] != v:
+                        h.write_raw(k, v)
+                        groups[RAM_KEYS[k]][k] = v
                 obs_t, changed = time.time(), True
             if time.time() - info_t > INFO_EVERY:
                 info, info_t, changed = h.info(), time.time(), True
@@ -245,6 +269,8 @@ def main():
                         print(f"{g}: missed push corrected", flush=True)
                     groups.setdefault(g, {}).update(fresh)
                     changed = True
+            if changed:
+                save_ram(groups)
             due = changed or time.time() - last_write > 1
             if due:
                 settings, eq, custom = derive(groups)

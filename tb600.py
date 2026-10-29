@@ -212,6 +212,7 @@ class Dev:
         self._write(bytes([0x05, 0x5A]) + struct.pack("<HH", len(msg) + 2, RACE_COAP) + msg)
         for p in self.packets(timeout):
             if not (len(p) > 6 and p[1] in (0x5B, 0x5D) and p[4:6] == b"\x02\x99"):
+                self._spill(p)  # a 0x2CB1 link indication lost here left tb600d waiting for a link-up that came
                 continue
             resp = self._parse_coap(p[6:])
             if not (resp and resp["token"] == tok):
